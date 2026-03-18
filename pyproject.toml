@@ -1,0 +1,18 @@
+[project]
+name = "homecreditrisk"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "kagglehub>=1.0.0",
+    "legacy-cgi>=2.6.4",
+    "opendatasets>=0.1.22",
+    "pandas>=3.0.1",
+    "scikit-learn>=1.8.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "CreditRiskPractice",
+]
