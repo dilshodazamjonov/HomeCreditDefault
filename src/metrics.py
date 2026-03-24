@@ -2,10 +2,7 @@
 from sklearn.metrics import (
     roc_auc_score, 
     confusion_matrix, 
-    roc_curve, 
-    precision_score, 
-    recall_score, 
-    f1_score,
+    roc_curve,
     accuracy_score
 )
 import numpy as np
@@ -37,7 +34,51 @@ def gini_score(y_true, y_pred_proba):
     """
     return 2 * roc_auc_score(y_true, y_pred_proba) - 1
 
-def evaluate_model(y_true, y_pred_proba, threshold=0.5):# threshold needs to be tuned based KS-maximizing threshold
+def precision_score(y_true, y_pred):
+    """
+    Wrapper for sklearn's precision_score to handle zero division.
+    """
+    y_pred = np.array(y_pred)
+    y_true = np.array(y_true)
+    
+    tp = np.sum((y_pred == 1) & (y_true == 1))
+    fp = np.sum((y_pred == 1) & (y_true == 0))
+    
+    if tp + fp == 0:
+        return 0
+    return tp / (tp + fp)
+
+def recall_score(y_true, y_pred):
+    """
+    Wrapper for sklearn's recall_score to handle zero division.
+    """
+    y_pred = np.array(y_pred)
+    y_true = np.array(y_true)
+    
+    tp = np.sum((y_pred == 1) & (y_true == 1))
+    fn = np.sum((y_pred == 0) & (y_true == 1))
+    
+    if tp + fn == 0:
+        return 0
+    
+    return tp / (tp + fn)
+
+def f1_score(y_true, y_pred):
+    """
+    Calculates the F1 score based on precision and recall.
+    F1 = 2 * (precision * recall) / (precision + recall)
+    Handles zero division by returning 0 if precision + recall is 0.    
+    """
+    p = precision_score(y_true, y_pred)
+    r = recall_score(y_true, y_pred)
+    
+    if p + r == 0:
+        return 0
+    
+    return 2 * (p * r) / (p + r)
+
+
+def evaluate_model(y_true, y_pred_proba, threshold=0.5): # threshold needs to be tuned based KS-maximizing threshold
     """
     Evaluates a binary classification model across metrics and business KPIs.
     
@@ -67,9 +108,9 @@ def evaluate_model(y_true, y_pred_proba, threshold=0.5):# threshold needs to be 
         "ks_threshold": ks_thresh,
         
         "confusion_matrix": confusion_matrix(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall": recall_score(y_true, y_pred, zero_division=0),
-        "f1_score": f1_score(y_true, y_pred, zero_division=0),
+        "precision": precision_score(y_true, y_pred),
+        "recall": recall_score(y_true, y_pred),
+        "f1": f1_score(y_true, y_pred),
         "accuracy": accuracy_score(y_true, y_pred),
         
         # Business metrics

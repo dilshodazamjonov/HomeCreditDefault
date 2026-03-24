@@ -1,28 +1,31 @@
 # run_pipeline.py
 import pandas as pd
-from tqdm import tqdm
 import time
+
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import StratifiedKFold
+
 from src.metrics import evaluate_model, plot_threshold_analysis
 from src.data import load_data, merge_left
 
+
 def run():
     """
-    Executes the end-to-end credit risk modeling pipeline:
-    1. Loads Home Credit datasets.
-    2. Aggregates bureau data per applicant.
-    3. Merges aggregated bureau features with training data.
-    4. Scales numeric features using StandardScaler.
-    5. Trains a Logistic Regression model.
-    6. Evaluates model metrics including Gini, KS, AUC, Precision, Recall, F1.
-    7. Computes the KS-optimal threshold and re-evaluates metrics at that threshold.
-    8. Prints top features by absolute coefficient.
-    9. Generates a threshold analysis plot showing Approval Rate, Bad Rate, and KS threshold.
+    End-to-end credit scoring pipeline WITH Cross-Validation:
+    - Data loading
+    - Feature aggregation
+    - CV training (Stratified K-Fold)
+    - Metrics averaging
+    - Final model training
     """
-    
-    bureau_df, raw_train_df, raw_test_df = load_data(data_dir='data/inputs/home-credit-default-risk')
 
+    # ===================== LOAD DATA =====================
+    bureau_df, raw_train_df, raw_test_df = load_data(
+        data_dir='data/inputs/home-credit-default-risk'
+    )
+
+    # ===================== FEATURE ENGINEERING =====================
     bureau_agg = bureau_df.groupby("SK_ID_CURR").agg(
         bureau_count=("SK_ID_BUREAU", "count"),
         avg_credit_sum=("AMT_CREDIT_SUM", "mean"),
@@ -33,47 +36,98 @@ def run():
         avg_credit_days=("DAYS_CREDIT", "mean")
     )
 
-    with tqdm(total=1, desc="Merging & Preprocessing") as pbar:
-        train_combined = merge_left(raw_train_df, bureau_agg, on="SK_ID_CURR")
-        X_train = train_combined.drop(columns=["TARGET", "SK_ID_CURR"]).select_dtypes(include=['number']).fillna(0)
-        y_train = raw_train_df["TARGET"]
-        pbar.update(1)
+    print("\nMerging & preprocessing...")
+    train_combined = merge_left(raw_train_df, bureau_agg, on="SK_ID_CURR")
+
+    X = train_combined.drop(columns=["TARGET", "SK_ID_CURR"]) \
+        .select_dtypes(include=['number']) \
+        .fillna(0)
+
+    y = raw_train_df["TARGET"]
+
+    print(f"Dataset shape: {X.shape}")
+
+    # ===================== CROSS VALIDATION =====================
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    cv_results = []
+
+    print("\nStarting Cross-Validation...\n")
+
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+        print(f"\n--- Fold {fold} ---")
+
+        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+        # ⚠️ SCALING ONLY ON TRAIN (NO LEAKAGE)
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_val_scaled = scaler.transform(X_val)
+
+        model = LogisticRegression(max_iter=1000)
+
+        start_time = time.time()
+        model.fit(X_train_scaled, y_train)
+        print(f"Training time: {time.time() - start_time:.2f}s")
+
+        # Predict
+        y_val_pred_proba = model.predict_proba(X_val_scaled)[:, 1]
+
+        # Metrics WITHOUT threshold
+        metrics = evaluate_model(y_val, y_val_pred_proba)
+
+        # Apply KS threshold
+        ks_threshold = metrics['ks_threshold']
+        metrics = evaluate_model(y_val, y_val_pred_proba, threshold=ks_threshold)
+
+        cv_results.append(metrics)
+
+        print(f"AUC: {metrics['auc']:.4f}, Gini: {metrics['gini']:.4f}, KS: {metrics['ks']:.4f}")
+
+    # ===================== CV SUMMARY =====================
+    print("\n===== CROSS-VALIDATION RESULTS =====")
+
+    cv_df = pd.DataFrame(cv_results)
+
+    for col in ["auc", "gini", "ks", "precision", "recall", "f1"]:
+        print(f"{col.upper()} mean: {cv_df[col].mean():.4f}")
+
+    # ===================== FINAL MODEL (FULL DATA) =====================
+    print("\nTraining final model on full dataset...")
 
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
+    X_scaled = scaler.fit_transform(X)
 
-    print(f"\nStarting Model Training on {X_train.shape[0]} samples with {X_train.shape[1]} features...")
-    start_time = time.time()
-    
-    with tqdm(total=1, desc="Fitting Logistic Regression", bar_format="{desc}: {elapsed}") as pbar:
-        model = LogisticRegression(max_iter=1000)
-        model.fit(X_train_scaled, y_train)
-        pbar.update(1)
-        
-    print(f"Training completed in {time.time() - start_time:.2f} seconds.")
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X_scaled, y)
 
-    with tqdm(total=1, desc="Calculating Metrics") as pbar:
-        y_train_pred_proba = model.predict_proba(X_train_scaled)[:, 1]
-        train_metrics = evaluate_model(y_train, y_train_pred_proba)
-        optimal_threshold = train_metrics['ks_threshold']
-        train_metrics = evaluate_model(y_train, y_train_pred_proba, threshold=optimal_threshold)
-        pbar.update(1)
+    y_pred_proba = model.predict_proba(X_scaled)[:, 1]
 
-    print("\n--- Train Metrics ---")
-    for metric, value in train_metrics.items():
+    final_metrics = evaluate_model(y, y_pred_proba)
+    optimal_threshold = final_metrics['ks_threshold']
+
+    final_metrics = evaluate_model(y, y_pred_proba, threshold=optimal_threshold)
+
+    print("\n===== FINAL MODEL METRICS =====")
+    for metric, value in final_metrics.items():
         if metric == "confusion_matrix":
             print(f"{metric}:\n{value}")
         else:
             print(f"{metric}: {value:.4f}")
 
+    # ===================== FEATURE IMPORTANCE =====================
     feature_importance = pd.DataFrame({
-        "feature": X_train.columns,
+        "feature": X.columns,
         "coefficient": model.coef_[0]
     }).sort_values(by="coefficient", key=abs, ascending=False)
-    print("\nTop Features by Absolute Coefficient:")
+
+    print("\nTop Features:")
     print(feature_importance.head(10))
 
-    plot_threshold_analysis(y_train.values, y_train_pred_proba, train_metrics)
+    # ===================== PLOT =====================
+    plot_threshold_analysis(y.values, y_pred_proba, final_metrics)
+
 
 if __name__ == "__main__":
     run()
