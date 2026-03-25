@@ -19,6 +19,9 @@ def ks_score(y_true, y_prob):
     Returns:
         tuple: (KS statistic, optimal threshold)
     """
+    y_true = np.array(y_true)
+    y_prob = np.array(y_prob)
+
     fpr, tpr, thresholds = roc_curve(y_true, y_prob)
     diffs = tpr - fpr
 
@@ -27,6 +30,7 @@ def ks_score(y_true, y_prob):
     ks_idx = np.argmax(diffs)
     return ks, thresholds[ks_idx]
 
+
 def gini_score(y_true, y_pred_proba):
     """
     Calculates the Gini coefficient based on ROC AUC.
@@ -34,10 +38,8 @@ def gini_score(y_true, y_pred_proba):
     """
     return 2 * roc_auc_score(y_true, y_pred_proba) - 1
 
+
 def precision_score(y_true, y_pred):
-    """
-    Wrapper for sklearn's precision_score to handle zero division.
-    """
     y_pred = np.array(y_pred)
     y_true = np.array(y_true)
     
@@ -48,10 +50,8 @@ def precision_score(y_true, y_pred):
         return 0
     return tp / (tp + fp)
 
+
 def recall_score(y_true, y_pred):
-    """
-    Wrapper for sklearn's recall_score to handle zero division.
-    """
     y_pred = np.array(y_pred)
     y_true = np.array(y_true)
     
@@ -62,6 +62,7 @@ def recall_score(y_true, y_pred):
         return 0
     
     return tp / (tp + fn)
+
 
 def f1_score(y_true, y_pred):
     """
@@ -78,9 +79,12 @@ def f1_score(y_true, y_pred):
     return 2 * (p * r) / (p + r)
 
 
-def evaluate_model(y_true, y_pred_proba, threshold=0.5): # threshold needs to be tuned based KS-maximizing threshold
+def evaluate_model(y_true, y_pred_proba, threshold=None):
     """
     Evaluates a binary classification model across metrics and business KPIs.
+    
+    If threshold is not provided, it defaults to KS-based threshold (for analysis only).
+    In production, threshold must be precomputed on train data and passed explicitly.
     
     Returns:
         dict: {
@@ -89,41 +93,53 @@ def evaluate_model(y_true, y_pred_proba, threshold=0.5): # threshold needs to be
             'approval_rate', 'bad_rate_approved'
         }
     """
+
+    y_true = np.array(y_true)
+    y_pred_proba = np.array(y_pred_proba)
+
+    # KS (always calculated for monitoring)
+    ks, ks_thresh = ks_score(y_true, y_pred_proba)
+
+    # NOTE:
+    # If threshold is None → fallback to KS threshold (NOT production-safe)
+    # Proper usage: pass threshold computed on train data
+    if threshold is None:
+        threshold = ks_thresh
+
     # Binary predictions
     y_pred = (y_pred_proba >= threshold).astype(int)
-    
-    # KS and threshold
-    ks, ks_thresh = ks_score(y_true, y_pred_proba)
-    
+
     # Business metrics
     approval_rate = float(np.mean(y_pred == 0))  # % approved
     approved_mask = (y_pred == 0)
     bad_rate_approved = float(np.mean(y_true[approved_mask])) if np.sum(approved_mask) > 0 else 0
-    
+
     return {
         # ML metrics
         "gini": gini_score(y_true, y_pred_proba),
         "auc": roc_auc_score(y_true, y_pred_proba),
         "ks": ks,
         "ks_threshold": ks_thresh,
-        
+
         "confusion_matrix": confusion_matrix(y_true, y_pred),
         "precision": precision_score(y_true, y_pred),
         "recall": recall_score(y_true, y_pred),
         "f1": f1_score(y_true, y_pred),
         "accuracy": accuracy_score(y_true, y_pred),
-        
+
         # Business metrics
         "approval_rate": approval_rate,
         "bad_rate_approved": bad_rate_approved
     }
 
-
 # -----------------------------
 # Threshold analysis plot
 # -----------------------------
 def plot_threshold_analysis(y_true, y_prob, train_metrics):
-    thresholds = [0.01 * i for i in range(1, 100)]
+    y_true = np.array(y_true)
+    y_prob = np.array(y_prob)
+
+    thresholds = np.linspace(0, 1, 100)
     approval_rates = []
     bad_rates = []
 

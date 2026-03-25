@@ -6,7 +6,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedKFold
 
-from src.metrics import evaluate_model, plot_threshold_analysis
+from src.metrics import evaluate_model, ks_score, plot_threshold_analysis
 from src.data import load_data, merge_left
 
 
@@ -16,6 +16,7 @@ def run():
     - Data loading
     - Feature aggregation
     - CV training (Stratified K-Fold)
+    - Proper threshold handling (NO leakage)
     - Metrics averaging
     - Final model training
     """
@@ -65,22 +66,25 @@ def run():
         X_train_scaled = scaler.fit_transform(X_train)
         X_val_scaled = scaler.transform(X_val)
 
-        model = LogisticRegression(max_iter=1000)
+        # 🔥 BEST PRACTICE LR
+        model = LogisticRegression(
+            max_iter=2000,
+            class_weight='balanced',   # important for imbalance
+            C=0.1                # regularization
+        )
 
         start_time = time.time()
         model.fit(X_train_scaled, y_train)
         print(f"Training time: {time.time() - start_time:.2f}s")
 
-        # Predict
+        # ===================== THRESHOLD (TRAIN ONLY) =====================
+        y_train_proba = model.predict_proba(X_train_scaled)[:, 1]
+        _, threshold = ks_score(y_train, y_train_proba)
+
+        # ===================== VALIDATION =====================
         y_val_pred_proba = model.predict_proba(X_val_scaled)[:, 1]
 
-        # Metrics WITHOUT threshold
-        metrics = evaluate_model(y_val, y_val_pred_proba)
-
-        # Apply KS threshold
-        ks_threshold = metrics['ks_threshold']
-        metrics = evaluate_model(y_val, y_val_pred_proba, threshold=ks_threshold)
-
+        metrics = evaluate_model(y_val, y_val_pred_proba, threshold=threshold)
         cv_results.append(metrics)
 
         print(f"AUC: {metrics['auc']:.4f}, Gini: {metrics['gini']:.4f}, KS: {metrics['ks']:.4f}")
@@ -93,21 +97,25 @@ def run():
     for col in ["auc", "gini", "ks", "precision", "recall", "f1"]:
         print(f"{col.upper()} mean: {cv_df[col].mean():.4f}")
 
-    # ===================== FINAL MODEL (FULL DATA) =====================
+    # ===================== FINAL MODEL =====================
     print("\nTraining final model on full dataset...")
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    model = LogisticRegression(max_iter=1000)
+    model = LogisticRegression(
+        max_iter=2000,
+        class_weight='balanced',
+        C=0.1
+    )
+
     model.fit(X_scaled, y)
 
-    y_pred_proba = model.predict_proba(X_scaled)[:, 1]
+    # threshold from FULL TRAIN (acceptable for demo)
+    y_full_proba = model.predict_proba(X_scaled)[:, 1]
+    _, final_threshold = ks_score(y, y_full_proba)
 
-    final_metrics = evaluate_model(y, y_pred_proba)
-    optimal_threshold = final_metrics['ks_threshold']
-
-    final_metrics = evaluate_model(y, y_pred_proba, threshold=optimal_threshold)
+    final_metrics = evaluate_model(y, y_full_proba, threshold=final_threshold)
 
     print("\n===== FINAL MODEL METRICS =====")
     for metric, value in final_metrics.items():
@@ -126,7 +134,7 @@ def run():
     print(feature_importance.head(10))
 
     # ===================== PLOT =====================
-    plot_threshold_analysis(y.values, y_pred_proba, final_metrics)
+    plot_threshold_analysis(y.values, y_full_proba, final_metrics)
 
 
 if __name__ == "__main__":

@@ -1,28 +1,45 @@
-# run_pipeline_rf_with_submission.py
+# run_pipeline_rf.py
 import pandas as pd
-from tqdm import tqdm
 import time
-from sklearn.ensemble import RandomForestClassifier
-from src.metrics import evaluate_model, plot_threshold_analysis
-from src.data import load_data, merge_left
 import os
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import StratifiedKFold
+
+from src.metrics import evaluate_model, ks_score, plot_threshold_analysis
+from src.data import load_data, merge_left
+
+
+def get_model():
+    return RandomForestClassifier(
+        n_estimators=400,
+        max_depth=12,
+        min_samples_leaf=150,
+        max_features='sqrt',
+        class_weight='balanced',
+        random_state=42,
+        n_jobs=-1
+    )
+
 
 def run():
     """
-    Executes the end-to-end credit risk modeling pipeline using Random Forest:
-    1. Loads Home Credit datasets.
-    2. Aggregates bureau data per applicant.
-    3. Merges aggregated bureau features with training and test data.
-    4. Trains a Random Forest classifier on training data.
-    5. Evaluates model metrics on train set (test metrics if labels exist).
-    6. Saves test predictions to `data/output/submission.csv`.
-    7. Generates threshold analysis plot for train.
+    End-to-end Random Forest pipeline WITH Cross-Validation:
+    - Data loading
+    - Feature aggregation
+    - CV training
+    - Proper threshold handling (NO leakage)
+    - Metrics averaging
+    - Final model training
+    - Submission creation
     """
-    
-    # Load data
-    bureau_df, raw_train_df, raw_test_df = load_data(data_dir='data/inputs/home-credit-default-risk')
 
-    # Aggregate bureau data
+    # ===================== LOAD DATA =====================
+    bureau_df, raw_train_df, raw_test_df = load_data(
+        data_dir='data/inputs/home-credit-default-risk'
+    )
+
+    # ===================== FEATURE ENGINEERING =====================
     bureau_agg = bureau_df.groupby("SK_ID_CURR").agg(
         bureau_count=("SK_ID_BUREAU", "count"),
         avg_credit_sum=("AMT_CREDIT_SUM", "mean"),
@@ -33,68 +50,110 @@ def run():
         avg_credit_days=("DAYS_CREDIT", "mean")
     )
 
-    # Merge train and test with bureau aggregates
-    with tqdm(total=2, desc="Merging & Preprocessing") as pbar:
-        train_combined = merge_left(raw_train_df, bureau_agg, on="SK_ID_CURR")
-        test_combined = merge_left(raw_test_df, bureau_agg, on="SK_ID_CURR")
-        X_train = train_combined.drop(columns=["TARGET", "SK_ID_CURR"]).select_dtypes(include=['number']).fillna(0)
-        y_train = raw_train_df["TARGET"]
-        X_test = test_combined.drop(columns=["SK_ID_CURR"]).select_dtypes(include=['number']).fillna(0)
-        test_ids = raw_test_df["SK_ID_CURR"]
-        pbar.update(2)
+    print("\nMerging & preprocessing...")
+    train_combined = merge_left(raw_train_df, bureau_agg, on="SK_ID_CURR")
+    test_combined = merge_left(raw_test_df, bureau_agg, on="SK_ID_CURR")
 
-    # Train Random Forest
-    print(f"\nStarting Random Forest Training on {X_train.shape[0]} samples with {X_train.shape[1]} features...")
-    start_time = time.time()
-    with tqdm(total=1, desc="Fitting Random Forest", bar_format="{desc}: {elapsed}") as pbar:
-        model = RandomForestClassifier(
-            n_estimators=200,
-            max_depth=10,
-            random_state=42,
-            n_jobs=-1
-        )
+    X = train_combined.drop(columns=["TARGET", "SK_ID_CURR"]) \
+        .select_dtypes(include=['number']) \
+        .fillna(0)
+
+    y = raw_train_df["TARGET"]
+
+    X_test = test_combined.drop(columns=["SK_ID_CURR"]) \
+        .select_dtypes(include=['number']) \
+        .fillna(0)
+
+    test_ids = raw_test_df["SK_ID_CURR"]
+
+    print(f"Dataset shape: {X.shape}")
+
+    # ===================== CROSS VALIDATION =====================
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    cv_results = []
+
+    print("\nStarting Cross-Validation...\n")
+
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+        print(f"\n--- Fold {fold} ---")
+
+        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+        model = get_model()
+
+        start_time = time.time()
         model.fit(X_train, y_train)
-        pbar.update(1)
-    print(f"Training completed in {time.time() - start_time:.2f} seconds.")
+        print(f"Training time: {time.time() - start_time:.2f}s")
 
-    # Predictions
-    y_train_pred_proba = model.predict_proba(X_train)[:, 1]
+        # ===================== THRESHOLD (TRAIN ONLY) =====================
+        y_train_proba = model.predict_proba(X_train)[:, 1]
+        _, threshold = ks_score(y_train, y_train_proba)
+
+        # ===================== VALIDATION =====================
+        y_val_pred_proba = model.predict_proba(X_val)[:, 1]
+
+        metrics = evaluate_model(y_val, y_val_pred_proba, threshold=threshold)
+        cv_results.append(metrics)
+
+        print(f"AUC: {metrics['auc']:.4f}, Gini: {metrics['gini']:.4f}, KS: {metrics['ks']:.4f}")
+
+    # ===================== CV SUMMARY =====================
+    print("\n===== CROSS-VALIDATION RESULTS =====")
+
+    cv_df = pd.DataFrame(cv_results)
+
+    for col in ["auc", "gini", "ks", "precision", "recall", "f1"]:
+        print(f"{col.upper()} mean: {cv_df[col].mean():.4f}")
+
+    # ===================== FINAL MODEL =====================
+    print("\nTraining final model on full dataset...")
+
+    model = get_model()
+    model.fit(X, y)
+
+    y_full_proba = model.predict_proba(X)[:, 1]
     y_test_pred_proba = model.predict_proba(X_test)[:, 1]
 
-    # Evaluate train metrics & KS threshold
-    train_metrics = evaluate_model(y_train, y_train_pred_proba)
-    optimal_threshold = train_metrics['ks_threshold']
-    train_metrics = evaluate_model(y_train, y_train_pred_proba, threshold=optimal_threshold)
+    # threshold from FULL TRAIN (acceptable for demo)
+    _, final_threshold = ks_score(y, y_full_proba)
 
-    # Print train metrics
-    print("\n--- Train Metrics ---")
-    for metric, value in train_metrics.items():
+    final_metrics = evaluate_model(y, y_full_proba, threshold=final_threshold)
+
+    print("\n===== FINAL MODEL METRICS =====")
+    for metric, value in final_metrics.items():
         if metric == "confusion_matrix":
             print(f"{metric}:\n{value}")
         else:
             print(f"{metric}: {value:.4f}")
 
-    # Save test predictions
+    # ===================== FEATURE IMPORTANCE =====================
+    feature_importance = pd.DataFrame({
+        "feature": X.columns,
+        "importance": model.feature_importances_
+    }).sort_values(by="importance", ascending=False)
+
+    print("\nTop Features:")
+    print(feature_importance.head(10))
+
+    # ===================== SAVE SUBMISSION =====================
     submission_df = pd.DataFrame({
         "SK_ID_CURR": test_ids,
         "TARGET": y_test_pred_proba
     })
+
     output_dir = "data/outputs"
     os.makedirs(output_dir, exist_ok=True)
-    submission_path = os.path.join(output_dir, "submission.csv")
+
+    submission_path = os.path.join(output_dir, "submission_rf.csv")
     submission_df.to_csv(submission_path, index=False)
-    print(f"\nTest predictions saved to: {submission_path}")
 
-    # Feature importance
-    feature_importance = pd.DataFrame({
-        "feature": X_train.columns,
-        "importance": model.feature_importances_
-    }).sort_values(by="importance", ascending=False)
-    print("\nTop Features by Importance:")
-    print(feature_importance.head(10))
+    print(f"\nSubmission saved to: {submission_path}")
 
-    # Threshold analysis plot for train
-    plot_threshold_analysis(y_train.values, y_train_pred_proba, train_metrics)
+    # ===================== PLOT =====================
+    plot_threshold_analysis(y.values, y_full_proba, final_metrics)
+
 
 if __name__ == "__main__":
     run()
