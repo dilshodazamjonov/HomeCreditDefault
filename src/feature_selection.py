@@ -18,7 +18,7 @@ class FeatureSelector(TransformerMixin, BaseEstimator, MetaEstimatorMixin):
         k: int,
         method: str,
         n_iter: int = 1,
-        correlation: str = "pearson",
+        correlation: str = "spearman",
         random_state: int = 42,
     ):
         self.k = k
