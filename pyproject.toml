@@ -8,6 +8,7 @@ dependencies = [
     "kagglehub>=1.0.0",
     "legacy-cgi>=2.6.4",
     "matplotlib>=3.10.8",
+    "mrmr-selection>=0.2.8",
     "opendatasets>=0.1.22",
     "pandas>=3.0.1",
     "scikit-learn>=1.8.0",
